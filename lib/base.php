@@ -372,95 +372,6 @@ final class Base extends Prefab implements ArrayAccess {
 	}
 
 	/**
-	*	Bind value to hive key
-	*	@return mixed
-	*	@param $key string
-	*	@param $val mixed
-	*	@param $ttl int
-	**/
-	function set($key,$val,$ttl=0) {
-		$time=(int)$this->hive['TIME'];
-		if (preg_match('/^(GET|POST|COOKIE)\b(.+)/',$key,$expr)) {
-			$this->set('REQUEST'.$expr[2],$val);
-			if ($expr[1]=='COOKIE') {
-				$parts=$this->cut($key);
-				$jar=$this->unserialize($this->serialize($this->hive['JAR']));
-				unset($jar['lifetime']);
-				if (version_compare(PHP_VERSION, '7.3.0') >= 0) {
-					unset($jar['expire']);
-					if (isset($_COOKIE[$parts[1]]))
-						setcookie($parts[1],NULL,['expires'=>0]+$jar);
-					if ($ttl)
-						$jar['expires']=$time+$ttl;
-					setcookie($parts[1],$val,$jar);
-				} else {
-					unset($jar['samesite']);
-					if (isset($_COOKIE[$parts[1]]))
-						call_user_func_array('setcookie',
-							array_merge([$parts[1],NULL],['expire'=>0]+$jar));
-					if ($ttl)
-						$jar['expire']=$time+$ttl;
-					call_user_func_array('setcookie',[$parts[1],$val]+$jar);
-				}
-				$_COOKIE[$parts[1]]=$val;
-				return $val;
-			}
-		}
-		else switch ($key) {
-		case 'CACHE':
-			$val=Cache::instance()->load($val);
-			break;
-		case 'ENCODING':
-			ini_set('default_charset',$val);
-			if (extension_loaded('mbstring'))
-				mb_internal_encoding($val);
-			break;
-		case 'FALLBACK':
-			$this->fallback=$val;
-			$lang=$this->language($this->hive['LANGUAGE']);
-		case 'LANGUAGE':
-			if (!isset($lang))
-				$val=$this->language($val);
-			$lex=$this->lexicon($this->hive['LOCALES'],$ttl);
-		case 'LOCALES':
-			if (isset($lex) || $lex=$this->lexicon($val,$ttl))
-				foreach ($lex as $dt=>$dd) {
-					$ref=&$this->ref($this->hive['PREFIX'].$dt);
-					$ref=$dd;
-					unset($ref);
-				}
-			break;
-		case 'TZ':
-			date_default_timezone_set($val);
-			break;
-		}
-		$ref=&$this->ref($key);
-		$ref=$val;
-		if (preg_match('/^JAR\b/',$key)) {
-			if ($key=='JAR.lifetime')
-				$this->set('JAR.expire',$val==0?0:
-					(is_int($val)?$time+$val:strtotime($val)));
-			else {
-				if ($key=='JAR.expire')
-					$this->hive['JAR']['lifetime']=max(0,$val-$time);
-				$jar=$this->unserialize($this->serialize($this->hive['JAR']));
-				unset($jar['expire']);
-				if (!headers_sent() && session_status()!=PHP_SESSION_ACTIVE)
-					if (version_compare(PHP_VERSION, '7.3.0') >= 0)
-						session_set_cookie_params($jar);
-					else {
-						unset($jar['samesite']);
-						call_user_func_array('session_set_cookie_params',$jar);
-					}
-			}
-		}
-		if ($ttl)
-			// Persist the key-value pair
-			Cache::instance()->set($this->hash($key).'.var',$val,$ttl);
-		return $ref;
-	}
-
-	/**
 	*	Retrieve contents of hive key
 	*	@return mixed
 	*	@param $key string
@@ -1991,107 +1902,6 @@ final class Base extends Prefab implements ArrayAccess {
 	}
 
 	/**
-	*	Configure framework according to .ini-style file settings;
-	*	If optional 2nd arg is provided, template strings are interpreted
-	*	@return object
-	*	@param $source string|array
-	*	@param $allow bool
-	**/
-	function config($source,$allow=FALSE) {
-		if (is_string($source))
-			$source=$this->split($source);
-		if ($allow)
-			$preview=Preview::instance();
-		foreach ($source as $file) {
-			preg_match_all(
-				'/(?<=^|\n)(?:'.
-					'\[(?<section>.+?)\]|'.
-					'(?<lval>[^\h\r\n;].*?)\h*=\h*'.
-					'(?<rval>(?:\\\\\h*\r?\n|.+?)*)'.
-				')(?=\r?\n|$)/',
-				$this->read($file),
-				$matches,PREG_SET_ORDER);
-			if ($matches) {
-				$sec='globals';
-				$cmd=[];
-				foreach ($matches as $match) {
-					if ($match['section']) {
-						$sec=$match['section'];
-						if (preg_match(
-							'/^(?!(?:global|config|route|map|redirect)s\b)'.
-							'(.*?)(?:\s*[:>])/i',$sec,$msec) &&
-							!$this->exists($msec[1]))
-							$this->set($msec[1],NULL);
-						preg_match('/^(config|route|map|redirect)s\b|'.
-							'^(.+?)\s*\>\s*(.*)/i',$sec,$cmd);
-						continue;
-					}
-					if ($allow)
-						foreach (['lval','rval'] as $ndx)
-							$match[$ndx]=$preview->
-								resolve($match[$ndx],NULL,0,FALSE,FALSE);
-					if (!empty($cmd)) {
-						isset($cmd[3])?
-						$this->call($cmd[3],
-							[$match['lval'],$match['rval'],$cmd[2]]):
-						call_user_func_array(
-							[$this,$cmd[1]],
-							array_merge([$match['lval']],
-								str_getcsv($cmd[1]=='config'?
-								$this->cast($match['rval']):
-									$match['rval']))
-						);
-					}
-					else {
-						$rval=preg_replace(
-							'/\\\\\h*(\r?\n)/','\1',$match['rval']);
-						$ttl=NULL;
-						if (preg_match('/^(.+)\|\h*(\d+)$/',$rval,$tmp)) {
-							array_shift($tmp);
-							list($rval,$ttl)=$tmp;
-						}
-						$args=array_map(
-							function($val) {
-								$val=$this->cast($val);
-								if (is_string($val))
-									$val=strlen($val)?
-										preg_replace('/\\\\"/','"',$val):
-										NULL;
-								return $val;
-							},
-							// Mark quoted strings with 0x00 whitespace
-							str_getcsv(preg_replace(
-								'/(?<!\\\\)(")(.*?)\1/',
-								"\\1\x00\\2\\1",trim($rval)))
-						);
-						preg_match('/^(?<section>[^:]+)(?:\:(?<func>.+))?/',
-							$sec,$parts);
-						$func=isset($parts['func'])?$parts['func']:NULL;
-						$custom=(strtolower($parts['section'])!='globals');
-						if ($func)
-							$args=[$this->call($func,$args)];
-						if (count($args)>1)
-							$args=[$args];
-						if (isset($ttl))
-							$args=array_merge($args,[$ttl]);
-						call_user_func_array(
-							[$this,'set'],
-							array_merge(
-								[
-									($custom?($parts['section'].'.'):'').
-									$match['lval']
-								],
-								$args
-							)
-						);
-					}
-				}
-			}
-		}
-		return $this;
-	}
-
-	/**
 	*	Create mutex, invoke callback then drop ownership when done
 	*	@return mixed
 	*	@param $id string
@@ -3052,56 +2862,6 @@ class Preview extends View {
 	}
 
 	/**
-	*	Render template string
-	*	@return string
-	*	@param $node string|array
-	*	@param $hive array
-	*	@param $ttl int
-	*	@param $persist bool
-	*	@param $escape bool
-	**/
-	function resolve($node,array $hive=NULL,$ttl=0,$persist=FALSE,$escape=NULL) {
-		$fw=$this->fw;
-		$cache=Cache::instance();
-		if ($escape!==NULL) {
-			$esc=$fw->ESCAPE;
-			$fw->ESCAPE=$escape;
-		}
-		if ($ttl || $persist)
-			$hash=$fw->hash($fw->serialize($node));
-		if ($ttl && $cache->exists($hash,$data))
-			return $data;
-		if ($persist) {
-			if (!is_dir($tmp=$fw->TEMP))
-				mkdir($tmp,Base::MODE,TRUE);
-			if (!is_file($this->file=($tmp.
-				$fw->SEED.'.'.$hash.'.php')))
-				$fw->write($this->file,$this->build($node));
-			if (isset($_COOKIE[session_name()]) &&
-				!headers_sent() && session_status()!=PHP_SESSION_ACTIVE)
-				session_start();
-			$fw->sync('SESSION');
-			$data=$this->sandbox($hive);
-		}
-		else {
-			if (!$hive)
-				$hive=$fw->hive();
-			if ($fw->ESCAPE)
-				$hive=$this->esc($hive);
-			extract($hive);
-			unset($hive);
-			ob_start();
-			eval(' ?>'.$this->build($node).'<?php ');
-			$data=ob_get_clean();
-		}
-		if ($ttl)
-			$cache->set($hash,$data,$ttl);
-		if ($escape!==NULL)
-			$fw->ESCAPE=$esc;
-		return $data;
-	}
-
-	/**
 	 *	Parse template string
 	 *	@return string
 	 *	@param $text string
@@ -3560,15 +3320,6 @@ final class Registry {
 	**/
 	static function get($key) {
 		return self::$table[$key];
-	}
-
-	/**
-	*	Delete object from catalog
-	*	@param $key string
-	**/
-	static function clear($key) {
-		self::$table[$key]=NULL;
-		unset(self::$table[$key]);
 	}
 
 	//! Prohibit cloning
